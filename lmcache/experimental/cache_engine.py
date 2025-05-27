@@ -297,7 +297,7 @@ class LMCacheEngine:
             assert isinstance(key, CacheEngineKey)
 
             # Get the memory object from the storage backend
-            memory_obj = self.storage_manager.get(key)
+            memory_obj, is_hot_cache = self.storage_manager.get(key, True)
 
             if memory_obj is None:
                 if self.enable_p2p:
@@ -323,9 +323,9 @@ class LMCacheEngine:
             if isinstance(self.storage_manager, DistributedStorageManager):
                 self.storage_manager.remove(key)
 
-        retrieved_tokens = torch.sum(ret_mask)
+        retrieved_tokens = torch.sum(ret_mask).item()
         self.stats_monitor.on_retrieve_finished(monitor_req_id,
-                                                torch.sum(ret_mask))
+                                                retrieved_tokens, is_hot_cache)
         logger.debug(f"Retrieved {retrieved_tokens} "
                      f"out of {num_required_tokens} "
                      f"out of total {len(tokens)} tokens")

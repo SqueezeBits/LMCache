@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Union
 
 import prometheus_client
+import zmq
 
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
@@ -39,6 +40,8 @@ class LMCacheStats:
 class RetrieveRequestStats:
     num_tokens: int
     local_hit_tokens: int
+    hot_cache_hit_tokens: int
+    backend_cache_hit_tokens: int
     remote_hit_tokens: int  # Not used for now
     start_time: float
     end_time: float
@@ -96,6 +99,16 @@ class LMCStatsMonitor:
         self.retrieve_request_id = 0
         self.store_request_id = 0
 
+        self.hot_cache_retreived_tokens = 0
+        self.hot_cache_hit_tokens = 0
+        self.backend_retreived_tokens = 0
+        self.backend_cache_hit_tokens = 0
+
+        self.ctx = zmq.Context()
+        # socket
+        self.socket = self.ctx.socket(zmq.REP)
+        self.socket.bind(f"ipc:///tmp/lmcache_socket")
+
     @thread_safe
     def on_retrieve_request(self, num_tokens: int) -> int:
         """
@@ -105,6 +118,8 @@ class LMCStatsMonitor:
         curr_time = time.time()
         retrieve_stats = RetrieveRequestStats(num_tokens=num_tokens,
                                               local_hit_tokens=0,
+                                              hot_cache_hit_tokens=0,
+                                              backend_cache_hit_tokens=0,
                                               remote_hit_tokens=0,
                                               start_time=curr_time,
                                               end_time=0)
@@ -116,11 +131,19 @@ class LMCStatsMonitor:
         return self.retrieve_request_id - 1
 
     @thread_safe
-    def on_retrieve_finished(self, request_id: int, retrieved_tokens: int):
+    def on_retrieve_finished(self, request_id: int, retrieved_tokens: int, is_hot_cache: bool = True):
         curr_time = time.time()
         assert request_id in self.retrieve_requests
         retrieve_stats = self.retrieve_requests[request_id]
         retrieve_stats.local_hit_tokens = retrieved_tokens
+        if is_hot_cache:
+            retrieve_stats.hot_cache_hit_tokens = retrieved_tokens
+            self.hot_cache_hit_tokens += retrieved_tokens
+            self.hot_cache_retreived_tokens += retrieve_stats.num_tokens
+        else:
+            retrieve_stats.backend_cache_hit_tokens = retrieved_tokens
+            self.backend_cache_hit_tokens += retrieved_tokens
+            self.backend_retreived_tokens += retrieve_stats.num_tokens
         retrieve_stats.end_time = curr_time
         self.interval_hit_tokens += retrieved_tokens
         self.num_hit_tokens += retrieved_tokens
@@ -177,6 +200,9 @@ class LMCStatsMonitor:
             if store_stats.end_time == 0:
                 new_store_requests[request_id] = store_stats
         self.store_requests = new_store_requests
+
+        logger.info(f"Current Cache Hit Rate: (hot cache: {0 if self.hot_cache_retreived_tokens == 0 else self.hot_cache_hit_tokens / self.hot_cache_retreived_tokens * 100:.2f} %, "
+                    f"backend cache: {0 if self.backend_retreived_tokens == 0 else self.backend_cache_hit_tokens / self.backend_retreived_tokens * 100:.2f} %)")
 
     @thread_safe
     def get_stats_and_clear(self) -> LMCacheStats:
@@ -428,13 +454,38 @@ class LMCacheStatsLogger:
 
         self.thread = threading.Thread(target=self.log_worker, daemon=True)
         self.thread.start()
+        self.comm_thread = threading.Thread(target=self.comm, daemon=True)
+        self.comm_thread.start()
 
     def log_worker(self):
         while self.is_running:
             stats = self.monitor.get_stats_and_clear()
             self.prometheus_logger.log_prometheus(stats)
             time.sleep(self.log_interval)
+    
+    def comm(self):
+        while True:
+            message = self.monitor.socket.recv_string()
+            print(f"Received request: {message}")
+
+            if message == "get":
+                response = {
+                    "status": "ok",
+                    "data": {
+                        "hot_cache_retrieved_tokens": self.monitor.hot_cache_retreived_tokens,
+                        "hot_cache_hit_tokens": self.monitor.hot_cache_hit_tokens,
+                        "backend_retrieved_tokens": self.monitor.backend_retreived_tokens,
+                        "backend_hit_tokens": self.monitor.backend_cache_hit_tokens,
+                    }
+                }
+                self.monitor.socket.send_json(response)
+            elif message == "exit":
+                self.monitor.socket.send_json({"status": "exited"})
+                break
+            else:
+                self.monitor.socket.send_json({"status": "error"})
 
     def shutdown(self):
         self.is_running = False
         self.thread.join()
+        self.comm_thread.join()
