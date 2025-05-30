@@ -201,8 +201,8 @@ class LMCStatsMonitor:
                 new_store_requests[request_id] = store_stats
         self.store_requests = new_store_requests
 
-        logger.info(f"Current Cache Hit Rate: (hot cache: {0 if self.hot_cache_retreived_tokens == 0 else self.hot_cache_hit_tokens / self.hot_cache_retreived_tokens * 100:.2f} %, "
-                    f"backend cache: {0 if self.backend_retreived_tokens == 0 else self.backend_cache_hit_tokens / self.backend_retreived_tokens * 100:.2f} %)")
+        logger.info(f"Current Cache Hit Rate: (hot cache: {0 if self.hot_cache_retreived_tokens == 0 else self.hot_cache_hit_tokens / self.hot_cache_retreived_tokens * 100:.2f} % ({self.hot_cache_hit_tokens}), "
+                    f"backend cache: {0 if self.backend_retreived_tokens == 0 else self.backend_cache_hit_tokens / self.backend_retreived_tokens * 100:.2f} % ({self.backend_cache_hit_tokens}))")
 
     @thread_safe
     def get_stats_and_clear(self) -> LMCacheStats:
@@ -476,6 +476,9 @@ class LMCacheStatsLogger:
                         "hot_cache_hit_tokens": self.monitor.hot_cache_hit_tokens,
                         "backend_retrieved_tokens": self.monitor.backend_retreived_tokens,
                         "backend_hit_tokens": self.monitor.backend_cache_hit_tokens,
+                        "local_cache_usage": self.monitor.local_cache_usage_bytes,
+                        "remote_cache_usage": self.monitor.remote_cache_usage_bytes,
+                        "local_storage_usage": self.monitor.local_storage_usage_bytes,
                     }
                 }
                 self.monitor.socket.send_json(response)
