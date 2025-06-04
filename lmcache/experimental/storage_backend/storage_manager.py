@@ -270,7 +270,7 @@ class StorageManager:
             else:
                 self.manager_lock.release()
 
-    def get(self, key: CacheEngineKey, with_device_info: bool = False) -> Optional[MemoryObj] | Tuple[Optional[MemoryObj], bool]:
+    def get(self, key: CacheEngineKey, with_device_info: bool = False) -> Optional[MemoryObj] | Tuple[Optional[MemoryObj], bool, Optional[str]]:
         """
         Blocking function to get the memory object from the storages.
         """
@@ -299,7 +299,7 @@ class StorageManager:
             self.memory_allocator.ref_count_up(memory_obj)
             self.hot_cache.move_to_end(key)
             self.manager_lock.release()
-            return memory_obj if not with_device_info else (memory_obj, True) # use hot cache
+            return memory_obj if not with_device_info else (memory_obj, True, "hot_cache") # use hot cache
 
         self.manager_lock.release()
 
@@ -313,9 +313,9 @@ class StorageManager:
             memory_obj = backend.get_blocking(key)
             if memory_obj is not None:
                 self._update_hot_cache(key, memory_obj)
-                return memory_obj if not with_device_info else (memory_obj, False) # use backend storage
+                return memory_obj if not with_device_info else (memory_obj, False, backend_name) # use backend storage
 
-        return None if not with_device_info else (None, False)
+        return None if not with_device_info else (None, False, "unknown")
 
     # TODO(Jiayi): we need to consider eviction in prefetch
     def prefetch_callback(self, future, key):

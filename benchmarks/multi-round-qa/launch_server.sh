@@ -1,6 +1,6 @@
 #!/bin/bash
 
-MODEL_ID="meta-llama/Llama-3.2-1B-Instruct"
+MODEL_ID="Qwen/Qwen3-14B"
 KV_TRANSFER_CONFIG='{"kv_connector":"LMCacheConnector","kv_role":"kv_both"}'
 
 USE_LMCACHE=false
@@ -20,10 +20,12 @@ for arg in "$@"; do
 done
 
 if [[ "$STORAGE_TYPE" == "cpu" ]]; then
-    LMCACHE_ENVS="$LMCACHE_ENVS LMCACHE_LOCAL_CPU=True LMCACHE_MAX_LOCAL_CPU_SIZE=40.0"
+    LMCACHE_ENVS="$LMCACHE_ENVS LMCACHE_LOCAL_CPU=True LMCACHE_MAX_LOCAL_CPU_SIZE=60.0"
+elif [[ "$STORAGE_TYPE" == "cxl" ]]; then
+    LMCACHE_ENVS="$LMCACHE_ENVS LMCACHE_LOCAL_CPU=True LMCACHE_MAX_LOCAL_CPU_SIZE=120.0"
 elif [[ "$STORAGE_TYPE" == "disk" ]]; then
     DISK_PATH="lmcache_disk/"
-    LMCACHE_ENVS="$LMCACHE_ENVS LMCACHE_LOCAL_CPU=True LMCACHE_MAX_LOCAL_CPU_SIZE=5.0 LMCACHE_MAX_LOCAL_DISK_SIZE=40.0 LMCACHE_LOCAL_DISK=$DISK_PATH"
+    LMCACHE_ENVS="$LMCACHE_ENVS LMCACHE_LOCAL_CPU=True LMCACHE_MAX_LOCAL_CPU_SIZE=60.0 LMCACHE_MAX_LOCAL_DISK_SIZE=60.0 LMCACHE_LOCAL_DISK=$DISK_PATH"
 fi
 
 
@@ -32,7 +34,6 @@ python -m vllm.entrypoints.openai.api_server \
 --model $MODEL_ID \
 --tokenizer $MODEL_ID \
 --disable-log-requests \
---gpu-memory-utilization 0.5 \
 --uvicorn-log-level warning"
 
 if [ "$USE_LMCACHE" = true ]; then

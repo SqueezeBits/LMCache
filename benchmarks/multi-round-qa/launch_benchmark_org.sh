@@ -22,21 +22,56 @@ wait_for_server() {
     done' && return 0 || return 1
 }
 
-MODEL_ID="meta-llama/Llama-3.2-1B-Instruct"
+MODEL_ID="Qwen/Qwen3-14B"
 
+for qps in 0.5 1.0 1.5 2.0; do
+    . launch_server.sh &
+    wait_for_server
 
-python3 multi-round-qa-org.py \
-    --sharegpt \
-    --num-users 20 \
-    --num-rounds 5 \
-    --shared-system-prompt 1000 \
-    --user-history-prompt 2000 \
-    --max-answer-len 256 \
-    --min-answer-len 0 \
-    --model $MODEL_ID \
-    --base-url http://localhost:8000/v1 \
-    --qps 0.5 \
-    --time 30 \
-    --output test.csv
-  
-kill_gpu_processes
+    OUTPUT_FILE="results/org/default/qps_${qps}.csv"
+    python3 multi-round-qa-org.py \
+        --sharegpt \
+        --num-users 40 \
+        --num-rounds 16 \
+        --shared-system-prompt 1000 \
+        --user-history-prompt 2000 \
+        --max-answer-len 512 \
+        --min-answer-len 256 \
+        --model $MODEL_ID \
+        --base-url http://localhost:8000/v1 \
+        --qps $qps \
+        --output $OUTPUT_FILE \
+        --time 300
+
+    kill_gpu_processes
+    sleep 60
+done
+
+for type in cpu cxl disk; do
+
+    for qps in 0.5 1.0 1.5 2.0; do
+        . launch_server.sh --use-lmcache --type=$type &
+        wait_for_server
+
+        OUTPUT_FILE="results/org/lmcache/${type}_qps_${qps}.csv"
+        python3 multi-round-qa-org.py \
+            --sharegpt \
+            --num-users 40 \
+            --num-rounds 16 \
+            --shared-system-prompt 1000 \
+            --user-history-prompt 2000 \
+            --max-answer-len 512 \
+            --min-answer-len 256 \
+            --model $MODEL_ID \
+            --base-url http://localhost:8000/v1 \
+            --qps $qps \
+            --output $OUTPUT_FILE \
+            --time 300 \
+            --use-full-dialogue
+
+        rm lmcache_disk/*
+        kill_gpu_processes
+        sleep 60
+    done
+
+done

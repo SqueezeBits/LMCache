@@ -99,9 +99,7 @@ class LMCStatsMonitor:
         self.retrieve_request_id = 0
         self.store_request_id = 0
 
-        self.hot_cache_retreived_tokens = 0
         self.hot_cache_hit_tokens = 0
-        self.backend_retreived_tokens = 0
         self.backend_cache_hit_tokens = 0
 
         self.ctx = zmq.Context()
@@ -131,19 +129,18 @@ class LMCStatsMonitor:
         return self.retrieve_request_id - 1
 
     @thread_safe
-    def on_retrieve_finished(self, request_id: int, retrieved_tokens: int, is_hot_cache: bool = True):
+    def on_retrieve_finished(self, request_id: int, retrieved_tokens: int, backend_name: str, is_hot_cache: bool = True):
         curr_time = time.time()
         assert request_id in self.retrieve_requests
         retrieve_stats = self.retrieve_requests[request_id]
         retrieve_stats.local_hit_tokens = retrieved_tokens
+        # Can check backend_name if needed
         if is_hot_cache:
             retrieve_stats.hot_cache_hit_tokens = retrieved_tokens
             self.hot_cache_hit_tokens += retrieved_tokens
-            self.hot_cache_retreived_tokens += retrieve_stats.num_tokens
         else:
             retrieve_stats.backend_cache_hit_tokens = retrieved_tokens
             self.backend_cache_hit_tokens += retrieved_tokens
-            self.backend_retreived_tokens += retrieve_stats.num_tokens
         retrieve_stats.end_time = curr_time
         self.interval_hit_tokens += retrieved_tokens
         self.num_hit_tokens += retrieved_tokens
@@ -201,8 +198,8 @@ class LMCStatsMonitor:
                 new_store_requests[request_id] = store_stats
         self.store_requests = new_store_requests
 
-        logger.info(f"Current Cache Hit Rate: (hot cache: {0 if self.hot_cache_retreived_tokens == 0 else self.hot_cache_hit_tokens / self.hot_cache_retreived_tokens * 100:.2f} % ({self.hot_cache_hit_tokens}), "
-                    f"backend cache: {0 if self.backend_retreived_tokens == 0 else self.backend_cache_hit_tokens / self.backend_retreived_tokens * 100:.2f} % ({self.backend_cache_hit_tokens}))")
+        logger.info(f"Current Cache Hit Rate: (hot cache: {0 if self.num_requested_tokens == 0 else self.hot_cache_hit_tokens / self.num_requested_tokens * 100:.2f} % ({self.hot_cache_hit_tokens}), "
+                    f"backend cache: {0 if self.num_requested_tokens == 0 else self.backend_cache_hit_tokens / self.num_requested_tokens * 100:.2f} % ({self.backend_cache_hit_tokens}))")
 
     @thread_safe
     def get_stats_and_clear(self) -> LMCacheStats:
@@ -472,13 +469,12 @@ class LMCacheStatsLogger:
                 response = {
                     "status": "ok",
                     "data": {
-                        "hot_cache_retrieved_tokens": self.monitor.hot_cache_retreived_tokens,
                         "hot_cache_hit_tokens": self.monitor.hot_cache_hit_tokens,
-                        "backend_retrieved_tokens": self.monitor.backend_retreived_tokens,
                         "backend_hit_tokens": self.monitor.backend_cache_hit_tokens,
                         "local_cache_usage": self.monitor.local_cache_usage_bytes,
                         "remote_cache_usage": self.monitor.remote_cache_usage_bytes,
                         "local_storage_usage": self.monitor.local_storage_usage_bytes,
+                        "num_requested_tokens": self.monitor.num_requested_tokens,
                     }
                 }
                 self.monitor.socket.send_json(response)

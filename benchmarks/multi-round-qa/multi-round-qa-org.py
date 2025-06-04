@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import time
+import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from typing import Optional
 
@@ -33,6 +34,9 @@ class WorkloadConfig:
 
     # Number of rounds in the conversation
     num_rounds: int
+
+    # Whether to use full dialogue without capping to num_rounds
+    use_full_dialogue: bool
 
     # Overall QPS
     qps: int
@@ -65,6 +69,9 @@ class UserConfig:
     # Num rounds
     num_rounds: int
 
+    # Whether to use full dialogue without capping to num_rounds
+    use_full_dialogue: bool
+
     # Whether to include user id in request header
     enable_user_id: bool
 
@@ -76,8 +83,9 @@ class UserConfig:
             user_info_len=workload_config.user_info_len,
             max_answer_len=workload_config.max_answer_len,
             min_answer_len=workload_config.min_answer_len,
-            gap_between_requests=workload_config.num_users / workload_config.qps,
+            gap_between_requests=1 / workload_config.qps,
             num_rounds=workload_config.num_rounds,
+            use_full_dialogue=workload_config.use_full_dialogue,
             enable_user_id=workload_config.enable_user_id,
         )
 
@@ -125,7 +133,7 @@ class RequestExecutor:
         self.loop = AsyncLoopWrapper.GetOrStartLoop()
         self.request_history = []
 
-    async def _async_launch_request(self, messages, max_tokens, extra_headers=None):
+    async def _async_launch_request(self, messages, max_tokens, min_tokens, extra_headers=None):
         start_time = time.time()
         first_token_time = None
         words = ""
@@ -138,6 +146,7 @@ class RequestExecutor:
             max_tokens=max_tokens,
             stream_options={"include_usage": True},
             extra_headers=extra_headers,
+            extra_body={"min_tokens": min_tokens} if min_tokens is not None else None
         )
 
         async for tok in response:
@@ -165,6 +174,7 @@ class RequestExecutor:
         self,
         chat_history: ChatHistory,
         max_tokens: int,
+        min_tokens: int,
         finish_callback,
         extra_headers=None,
     ):
@@ -174,7 +184,7 @@ class RequestExecutor:
         messages = chat_history.get_messages_for_openai()
         real_callback = lambda x: finish_callback(x.result())
         future = asyncio.run_coroutine_threadsafe(
-            self._async_launch_request(messages, max_tokens, extra_headers),
+            self._async_launch_request(messages, max_tokens, min_tokens, extra_headers),
             self.loop,
         )
         future.add_done_callback(real_callback)
@@ -231,10 +241,13 @@ class UserSession:
         self.question_id += 1
         return f"Here's question #{self.question_id}: can you tell me " + "a new long story with a happy ending?"
 
+    def _prepare_start_with_gpt(self, gpt_text: str, human_text: str) -> str:
+        return f"Here's the conversation history: {gpt_text}. Here's the new question: {human_text}"
+
     def _launch_new_request(self, timestamp: float, request_executor: RequestExecutor):
         if self.use_sharegpt:
             if self.start_with_gpt:
-                prompt = self.sharegpt_data["conversations"][2 * self.question_id + 1]["value"]
+                prompt = self._prepare_start_with_gpt(self.sharegpt_data["conversations"][2 * self.question_id ]["value"], self.sharegpt_data["conversations"][2 * self.question_id + 1]["value"])
             else:
                 prompt = self.sharegpt_data["conversations"][2 * self.question_id]["value"]
             self.question_id += 1
@@ -246,10 +259,13 @@ class UserSession:
         logger.debug(f"User {self.user_config.user_id} issues request {self.question_id}")
         if self.use_sharegpt:
             if self.start_with_gpt:
-                max_tokens = self.sharegpt_data["conversations"][2 * self.question_id]["num_tokens"]
+                question_id = 2 * self.question_id
             else:
-                max_tokens = self.sharegpt_data["conversations"][2 * self.question_id - 1]["num_tokens"]
-            max_tokens = min(max_tokens, self.user_config.max_answer_len)
+                question_id = 2 * self.question_id - 1
+            if "num_tokens" in self.sharegpt_data["conversations"][question_id]:
+                max_tokens = min(self.sharegpt_data["conversations"][question_id]["num_tokens"], self.user_config.max_answer_len)
+            else:
+                max_tokens = self.user_config.max_answer_len
         else:
             max_tokens = self.user_config.max_answer_len
         max_tokens = max(max_tokens, self.user_config.min_answer_len)
@@ -257,6 +273,7 @@ class UserSession:
         request_executor.launch_request(
             self.chat_history,
             max_tokens,
+            self.user_config.min_answer_len,
             self._on_request_finished,
             extra_headers={"x-user-id": str(self.user_config.user_id)},
         )
@@ -290,7 +307,11 @@ class UserSession:
         )
 
     def step(self, timestamp: float, request_executor: RequestExecutor):
-        if self.question_id >= self.user_config.num_rounds and not self.has_unfinished_request:
+        if self.user_config.use_full_dialogue:
+            if self.question_id >= self.sharegpt_data["num_round"] / 2 - 1 and not self.has_unfinished_request:
+                self.finished = True
+                return
+        if not self.user_config.use_full_dialogue and self.question_id >= self.user_config.num_rounds and not self.has_unfinished_request:
             self.finished = True
             return
 
@@ -334,16 +355,9 @@ class UserSessionManager:
         self.workload_config = workload_config
         self.sessions = []
 
-        gap_between_requests_per_user = workload_config.num_users / workload_config.qps
-        session_alive_time = gap_between_requests_per_user * (workload_config.num_rounds - 1)
-        self.gap_between_users = session_alive_time / (workload_config.num_users + 0)
-        self.ramp_up_time = workload_config.num_users * self.gap_between_users
-
-        logger.info(
-            f"Gap between users: {self.gap_between_users} secs.\n"
-            f"Gap between user reqs: {gap_between_requests_per_user} secs.\n"
-            f"Expected length of user session: {session_alive_time} secs."
-        )
+        self.gap_between_requests = 1 / workload_config.qps
+        self.ramp_up_time = workload_config.num_users * self.gap_between_requests
+        logger.info(f"Using {self.gap_between_requests} secs between requests.")
 
         self.user_id = init_user_id
         self.last_user_join = 0
@@ -356,42 +370,52 @@ class UserSessionManager:
         if self.use_sharegpt:
             self._load_sharegpt_data()
 
-        self.hot_cache_retrieved_tokens = 0
         self.hot_cache_hit_tokens = 0
-        self.backend_retrieved_tokens = 0
         self.backend_hit_tokens = 0
         self.local_cache_usage = 0
         self.remote_cache_usage = 0
         self.local_storage_usage = 0
+        self.num_requested_tokens = 0
 
     def update_cache_stats(
         self,
-        hot_cache_retrieved_tokens: int,
         hot_cache_hit_tokens: int,
-        backend_retrieved_tokens: int,
         backend_hit_tokens: int,
         local_cache_usage: int,
         remote_cache_usage: int,
         local_storage_usage: int,
+        num_requested_tokens: int,
     ):
-        self.hot_cache_retrieved_tokens = hot_cache_retrieved_tokens
         self.hot_cache_hit_tokens = hot_cache_hit_tokens
-        self.backend_retrieved_tokens = backend_retrieved_tokens
         self.backend_hit_tokens = backend_hit_tokens
         self.local_cache_usage = local_cache_usage
         self.remote_cache_usage = remote_cache_usage
         self.local_storage_usage = local_storage_usage
+        self.num_requested_tokens = num_requested_tokens
 
     def _load_sharegpt_data(self):
         with open("ShareGPT.json", "r", encoding="utf-8") as file:
             self.sharegpt_data = json.load(file)
+        max_rounds = max([d["num_round"] for d in self.sharegpt_data])
+        logger.info(f"There are {len(self.sharegpt_data)} users in the ShareGPT dataset. Exporting distribution of rounds to sharegpt_round_distribution.png")
+        plt.hist([d["num_round"] for d in self.sharegpt_data], bins=range(0, max_rounds + 10, 10), edgecolor="black")
+        plt.savefig("sharegpt_round_distribution.png")
+        plt.close()
+
         self.sharegpt_data = [d for d in self.sharegpt_data if d["num_round"] > 2 * self.workload_config.num_rounds]
+        logger.info(f"After filtering, there are {len(self.sharegpt_data)} users in the ShareGPT dataset. Exporting distribution of rounds to sharegpt_round_distribution_filtered.png.")
+        if not self.workload_config.use_full_dialogue:
+            logger.warning("Without use_full_dialogue, only num_rounds turns will be used.")
+        plt.hist([d["num_round"] for d in self.sharegpt_data], bins=range(max(0, self.workload_config.num_rounds - 10), max_rounds + 10, 10), edgecolor="black")
+        plt.savefig("sharegpt_round_distribution_filtered.png")
+        plt.close()
+
         logger.info(f"There are {len(self.sharegpt_data)} users satisfying ")
 
     def _ramp_up(self, timestamp: float, ramp_up_time: float):
         for i in range(self.workload_config.num_users):
             new_session = self._create_user_session()
-            offset = ramp_up_time - i * self.gap_between_users
+            offset = ramp_up_time - i * self.gap_between_requests
             if offset < 0:
                 break
             new_session.set_internal_state(offset, timestamp)
@@ -425,7 +449,7 @@ class UserSessionManager:
         if self.start_time is None:
             self.start_time = timestamp
 
-        if timestamp - self.last_user_join > self.gap_between_users:
+        if len(self.sessions) < self.workload_config.num_users:
             self._create_user_session()
             self.last_user_join = timestamp
             logger.info(f"Joined a new user {self.user_id}, " f"now active users: {len(self.sessions)}")
@@ -442,13 +466,12 @@ class UserSessionManager:
         end_time: Optional[float] = None,
         pending_queries: int = 0,
         qps: Optional[int] = None,
-        hot_cache_retrieved_tokens: int = 0,
         hot_cache_hit_tokens: int = 0,
-        backend_retrieved_tokens: int = 0,
         backend_hit_tokens: int = 0,
         local_cache_usage: int = 0,
         remote_cache_usage: int = 0,
         local_storage_usage: int = 0,
+        num_requested_tokens: int = 0,
     ):
         if start_time and end_time:
             launched_queries = len(df.query(f"{start_time} <= launch_time <= {end_time}"))
@@ -494,17 +517,15 @@ class UserSessionManager:
         print(f"  Local cache usage: {local_cache_usage}")
         print(f"  Remote cache usage: {remote_cache_usage}")
         print(f"  Local storage usage: {local_storage_usage}\n")
-        print(f"  Hot cache retrieved tokens: {hot_cache_retrieved_tokens}")
         print(f"  Hot cache hit tokens: {hot_cache_hit_tokens}")
         print(
-            f"  Hot cache hit rate: {0 if hot_cache_retrieved_tokens == 0 else hot_cache_hit_tokens / hot_cache_retrieved_tokens * 100:.2f}%"
+            f"  Hot cache hit rate: {0 if num_requested_tokens == 0 else hot_cache_hit_tokens / num_requested_tokens * 100:.2f}%"
         )
-        print(f"  Backend retrieved tokens: {backend_retrieved_tokens}")
         print(f"  Backend hit tokens: {backend_hit_tokens}")
         print(
-            f"  Backend hit rate: {0 if backend_retrieved_tokens == 0 else backend_hit_tokens / backend_retrieved_tokens * 100:.2f}%\n"
+            f"  Backend hit rate: {0 if num_requested_tokens == 0 else backend_hit_tokens / num_requested_tokens * 100:.2f}%\n"
         )
-        print(f"  QPS: {qps:.4f} reqs/s\n")
+        print(f"  QPS: {qps:.4f} reqs/s/user\n")
         print(f"  Processing speed: {finished_qps:.4f} reqs/s\n")
         print(f"  Requests on-the-fly: {pending_queries}\n")
         print(f"  Input tokens per second: {average_prefill_speed:.4f} tokens/s\n")
@@ -523,16 +544,14 @@ class UserSessionManager:
             "Finished queries": len(df),
             "Total prompt tokens": total_prompt_tokens,
             "Total generation tokens": total_generation_tokens,
-            "Hot cache retrieved tokens": hot_cache_retrieved_tokens,
             "Hot cache hit tokens": hot_cache_hit_tokens,
             "Hot cache hit rate (%)": 0
-            if hot_cache_retrieved_tokens == 0
-            else hot_cache_hit_tokens / hot_cache_retrieved_tokens * 100,
-            "Backend retrieved tokens": backend_retrieved_tokens,
+            if total_prompt_tokens == 0
+            else hot_cache_hit_tokens / total_prompt_tokens * 100,
             "Backend hit tokens": backend_hit_tokens,
             "Backend hit rate (%)": 0
-            if backend_retrieved_tokens == 0
-            else backend_hit_tokens / backend_retrieved_tokens * 100,
+            if total_prompt_tokens == 0
+            else backend_hit_tokens / total_prompt_tokens * 100,
             "QPS (requests/s)": qps,
             "Processing speed (requests/s)": finished_qps,
             "Requests on-the-fly": pending_queries,
@@ -564,13 +583,12 @@ class UserSessionManager:
             end_time,
             pending_queries,
             qps,
-            self.hot_cache_retrieved_tokens,
             self.hot_cache_hit_tokens,
-            self.backend_retrieved_tokens,
             self.backend_hit_tokens,
             self.local_cache_usage,
             self.remote_cache_usage,
             self.local_storage_usage,
+            self.num_requested_tokens,
         )
         return df, df_summary
 
@@ -580,7 +598,7 @@ def warmup_engine(executor):
     for i in range(10):
         chat_history = ChatHistory()
         chat_history.on_user_query(f"WARMUP: Hi, I'm user {i}. Here are some text: {'hi ' * 100}.")
-        executor.launch_request(chat_history, 100, lambda x: None)
+        executor.launch_request(chat_history, 100, None, lambda x: None)
 
     AsyncLoopWrapper.WaitLoop()
 
@@ -598,6 +616,7 @@ def parse_arguments() -> WorkloadConfig:
     parser.add_argument("--max-answer-len", type=int, required=True, help="Length of the answer in one round")
     parser.add_argument("--min-answer-len", type=int, required=True, help="Minimum length of the answer in one round")
     parser.add_argument("--num-rounds", type=int, required=True, help="Number of rounds in the conversation")
+    parser.add_argument("--use-full-dialogue", action="store_true", help="Use full dialogue without capping to num_rounds")
     parser.add_argument("--qps", type=float, required=True, help="Overall QPS")
     parser.add_argument("--model", type=str, required=True, help="Model name")
     parser.add_argument("--base-url", type=str, required=True, help="Base URL of the serving engine endpoint")
@@ -663,6 +682,7 @@ def main():
         max_answer_len=args.max_answer_len,
         min_answer_len=args.min_answer_len,
         num_rounds=args.num_rounds,
+        use_full_dialogue=args.use_full_dialogue,
         qps=args.qps,
         model=args.model,
         enable_user_id=args.request_with_user_id,
@@ -700,13 +720,12 @@ def main():
         socket.send_string("get")
         response = socket.recv_json()
         manager.update_cache_stats(
-            response["data"]["hot_cache_retrieved_tokens"],
             response["data"]["hot_cache_hit_tokens"],
-            response["data"]["backend_retrieved_tokens"],
             response["data"]["backend_hit_tokens"],
             response["data"]["local_cache_usage"],
             response["data"]["remote_cache_usage"],
             response["data"]["local_storage_usage"],
+            response["data"]["num_requested_tokens"],
         )
     except Exception as e:
         logger.warning(f"Failed to get cache stats: {e}")
@@ -714,7 +733,7 @@ def main():
     logger.info(f"Finished benchmarking, dumping summary to {args.output}")
     df, df_summary = manager.summary(0, time.time())
     df.to_csv(args.output, index=False)
-    df_summary.to_csv(f"{args.output.split('.')[0]}_summary.csv", index=False)
+    df_summary.to_csv(f"{'.'.join(args.output.split('.')[:-1])}_summary.csv", index=False)
 
 
 if __name__ == "__main__":
