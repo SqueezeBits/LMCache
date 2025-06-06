@@ -83,7 +83,7 @@ class UserConfig:
             user_info_len=workload_config.user_info_len,
             max_answer_len=workload_config.max_answer_len,
             min_answer_len=workload_config.min_answer_len,
-            gap_between_requests=1 / workload_config.qps,
+            gap_between_requests=workload_config.num_users / workload_config.qps,
             num_rounds=workload_config.num_rounds,
             use_full_dialogue=workload_config.use_full_dialogue,
             enable_user_id=workload_config.enable_user_id,
@@ -268,7 +268,8 @@ class UserSession:
                 max_tokens = self.user_config.max_answer_len
         else:
             max_tokens = self.user_config.max_answer_len
-        max_tokens = max(max_tokens, self.user_config.min_answer_len)
+        if self.user_config.min_answer_len is not None:
+            max_tokens = max(max_tokens, self.user_config.min_answer_len)
 
         request_executor.launch_request(
             self.chat_history,
@@ -355,9 +356,16 @@ class UserSessionManager:
         self.workload_config = workload_config
         self.sessions = []
 
-        self.gap_between_requests = 1 / workload_config.qps
-        self.ramp_up_time = workload_config.num_users * self.gap_between_requests
-        logger.info(f"Using {self.gap_between_requests} secs between requests.")
+        gap_between_requests_per_user = workload_config.num_users / workload_config.qps
+        session_alive_time = gap_between_requests_per_user * (workload_config.num_rounds - 1)
+        self.gap_between_users = session_alive_time / (workload_config.num_users + 0)
+        self.ramp_up_time = workload_config.num_users * self.gap_between_users
+
+        logger.info(
+            f"Gap between users: {self.gap_between_users} secs.\n"
+            f"Gap between user reqs: {gap_between_requests_per_user} secs.\n"
+            f"Expected length of user session: {session_alive_time} secs."
+        )
 
         self.user_id = init_user_id
         self.last_user_join = 0
@@ -415,7 +423,7 @@ class UserSessionManager:
     def _ramp_up(self, timestamp: float, ramp_up_time: float):
         for i in range(self.workload_config.num_users):
             new_session = self._create_user_session()
-            offset = ramp_up_time - i * self.gap_between_requests
+            offset = ramp_up_time - i * self.gap_between_users
             if offset < 0:
                 break
             new_session.set_internal_state(offset, timestamp)
@@ -449,7 +457,7 @@ class UserSessionManager:
         if self.start_time is None:
             self.start_time = timestamp
 
-        if len(self.sessions) < self.workload_config.num_users:
+        if timestamp - self.last_user_join > self.gap_between_users:
             self._create_user_session()
             self.last_user_join = timestamp
             logger.info(f"Joined a new user {self.user_id}, " f"now active users: {len(self.sessions)}")
@@ -614,7 +622,7 @@ def parse_arguments() -> WorkloadConfig:
         "--user-history-prompt", type=int, required=True, help="Length of the user-specific history prompt (tokens)"
     )
     parser.add_argument("--max-answer-len", type=int, required=True, help="Length of the answer in one round")
-    parser.add_argument("--min-answer-len", type=int, required=True, help="Minimum length of the answer in one round")
+    parser.add_argument("--min-answer-len", type=int, required=False, default=None, help="Minimum length of the answer in one round")
     parser.add_argument("--num-rounds", type=int, required=True, help="Number of rounds in the conversation")
     parser.add_argument("--use-full-dialogue", action="store_true", help="Use full dialogue without capping to num_rounds")
     parser.add_argument("--qps", type=float, required=True, help="Overall QPS")
