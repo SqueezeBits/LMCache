@@ -2,3 +2,5 @@ tqdm
 pandas
 openai
 matplotlib
+seaborn
+pandas

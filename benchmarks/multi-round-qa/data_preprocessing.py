@@ -5,6 +5,7 @@ from typing import List
 
 import numpy as np
 from transformers import AutoTokenizer
+import pandas as pd
 
 parser = argparse.ArgumentParser(description="Process data percentage.")
 parser.add_argument(
@@ -76,19 +77,44 @@ for idx, d in enumerate(data):
 print(f"Removing {len(idx_to_remove)} data due to consecutive human or gpt rounds.")
 data = [d for idx, d in enumerate(data) if idx not in idx_to_remove]
 
+# Data collection for plots
+all_num_rounds = []
+all_prompt_lengths = []
+all_output_lengths = []
+all_prompt_lengths_with_history = []
+plot_data_for_df = []
+
 for d in data:
     if len(d['conversations']) > 0 and d['conversations'][0]['from'] == 'system':
-        del d['conversations'][0] # Remove system prompt
-    d['num_round'] = len(d['conversations'])  # human is one round, gpt is another round
+        del d['conversations'][0]  # Remove system prompt
+    d['num_round'] = len(
+        d['conversations'])  # human is one round, gpt is another round
     human_tokens = []
     gpt_tokens = []
+    cumulative_tokens = 0
     for conv in d['conversations']:
+        num_tokens = estimate_num_tokens(conv['value'])
         if conv['from'] in args.human:
-            human_tokens.append(estimate_num_tokens(conv['value']))
-        if conv['from'] in args.gpt:
-            token_number = estimate_num_tokens(conv['value'])
-            conv['num_tokens'] = token_number
-            gpt_tokens.append(token_number)
+            human_tokens.append(num_tokens)
+        elif conv['from'] in args.gpt:
+            all_prompt_lengths_with_history.append(cumulative_tokens)
+            conv['num_tokens'] = num_tokens
+            gpt_tokens.append(num_tokens)
+        cumulative_tokens += num_tokens
+
+    all_num_rounds.append(d['num_round'])
+    all_prompt_lengths.extend(human_tokens)
+    all_output_lengths.extend(gpt_tokens)
+    if human_tokens:
+        plot_data_for_df.append({
+            'num_round': d['num_round'],
+            'total_prompt_length': sum(human_tokens),
+            'total_output_length': sum(gpt_tokens),
+            'last_prompt_length': human_tokens[-1] if human_tokens else 0,
+            'last_history_length': sum(human_tokens[:-1]) if len(human_tokens) > 1 else 0 + sum(gpt_tokens[:-1]) if len(gpt_tokens) > 1 else 0,
+            'last_output_length': gpt_tokens[-1] if gpt_tokens else 0,
+        })
+
     if len(human_tokens) == 0:
         d['average_human_token'] = 0
         d['max_human_token'] = 0
@@ -107,3 +133,12 @@ for d in data:
 
 with open('ShareGPT.json', 'w', encoding='utf-8') as file:
     json.dump(data, file, ensure_ascii=False, indent=2)
+
+with open('ShareGPT_stats.json', 'w', encoding='utf-8') as file:
+    json.dump({
+        'num_rounds': all_num_rounds,
+        'prompt_lengths': all_prompt_lengths,
+        'output_lengths': all_output_lengths,
+        'prompt_lengths_with_history': all_prompt_lengths_with_history,
+        'plot_data_for_df': plot_data_for_df,
+    }, file, ensure_ascii=False, indent=2)
