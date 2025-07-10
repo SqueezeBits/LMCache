@@ -1,55 +1,84 @@
 #!/bin/bash
 
-pip install -e .
+VENV_DIR=".venv"
+PYTHON_BIN="/usr/bin/python3.10"
+if [[ -d "$VENV_DIR" ]]; then
+  echo "⟳ Using existing venv: $(pwd)/$VENV_DIR"
+else
+  echo "⚙️  Creating venv with Python 3.10 at: $(pwd)/$VENV_DIR"
+  # use uv for fast venv creation
+  uv venv --python "$PYTHON_BIN" "$VENV_DIR"
+fi
+
+uv pip install -e .
+uv pip install matplotlib
+uv pip install pandas
+uv pip install -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
+
+# List installed packages for debugging
+echo "📦 Installed packages in venv:"
+uv pip freeze
 
 set -x
 
-cd ../lmcache-vllm
-git pull
-
-pip install matplotlib
-
-cd ../lmcache-tests
-git pull
+source .venv/bin/activate
+orig_dir="$(pwd)"
+cd "$LM_CACHE_TEST_DIR"
 
 set +x
 
-port1=8000
+start_port=8000
 max_port=9000
-while [ $port1 -le $max_port ]; do
-    netstat -tuln | grep ":$port1 " > /dev/null 2>&1
-    if [ $? -ne 0 ]; then
-        echo "Port $port1 is available."
-        break
-    else
-        echo "Port $port1 is in use, trying next..."
-        port1=$((port1 + 1))
-    fi
-done
-port2=$((port1 + 1))
-while [ $port2 -le $max_port ]; do
-    netstat -tuln | grep ":$port2 " > /dev/null 2>&1
-    if [ $? -ne 0 ]; then
-        echo "Port $port2 is available."
-        break
-    else
-        echo "Port $port2 is in use, trying next..."
-        port2=$((port2 + 1))
-    fi
-done
 
-LMCACHE_TRACK_USAGE="false" python3 main.py tests/tests.py -f test_lmcache_local_gpu -o outputs/ -p $port1 $port2
-# If the previous command fails, skip the next two commands.
-if [ -d "outputs/" ] && find outputs/ -type f -name "*.csv" | grep .; then
-    LMCACHE_TRACK_USAGE="false" python3 main.py tests/tests.py -f test_lmcache_local_distributed -o outputs/ -p $port1 $port2
-    LMCACHE_TRACK_USAGE="false" python3 main.py tests/tests.py -f test_lmcache_remote_cachegen -o outputs/ -p $port1 $port2
-else
-    echo "Error in test_lmcache_local_gpu, skipping next two commands."
-fi
+find_free_port() {
+  local port=$1
+  while [ $port -le $max_port ]; do
+    if ! netstat -tuln 2>/dev/null | grep -q ":$port "; then
+      >&2 echo "Port $port is available."
+      printf "%s" "$port"
+      return 0
+    fi
 
-cd ../end-to-end-tests/.buildkite
+    >&2 echo "Port $port is in use. Killing process(es)..."
+    local pids
+    pids=$(lsof -t -i tcp:$port)
+    if [ -n "$pids" ]; then
+      >&2 echo "→ Killing PID(s): $pids"
+      kill $pids
+      sleep 1
+      if ! netstat -tuln 2>/dev/null | grep -q ":$port "; then
+        >&2 echo "→ Port $port freed after killing processes."
+        printf "%s" "$port"
+        return 0
+      else
+        >&2 echo "→ Port $port still in use after kill. Continuing search..."
+      fi
+    else
+      >&2 echo "→ No PIDs found listening on $port. Continuing search..."
+    fi
+
+    port=$((port + 1))
+  done
+  return 1
+}
+
+# Find port1
+port1=$(find_free_port $start_port) || {
+  echo "❌ Could not find any free port between $start_port and $max_port."
+  exit 1
+}
+
+# Find port2, starting just after port1
+port2=$(find_free_port $((port1 + 1))) || {
+  echo "❌ Could not find a second free port between $((port1+1)) and $max_port."
+  exit 1
+}
+
+echo
+echo "🎉 Selected ports: port1=$port1, port2=$port2"
 
 set -x
 
-python3 drawing_wrapper.py ../../lmcache-tests/outputs/
-mv ../../lmcache-tests/outputs/*.{csv,pdf} ../
+LMCACHE_TRACK_USAGE="false" python3 main.py tests/tests.py -f test_local -o outputs/ -p $port1 $port2
+python3 outputs/drawing_wrapper.py ./
+mv outputs/*.{csv,pdf} "$orig_dir"/

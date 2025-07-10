@@ -4,13 +4,13 @@ from typing import List, Tuple
 
 import torch
 
-from lmcache.experimental.memory_management import (AdHocMemoryAllocator,
-                                                    MemoryFormat, MemoryObj)
-from lmcache.experimental.storage_backend.connector.nixl_connector import (
-    NixlConfig, NixlRole)
-from lmcache.experimental.storage_backend.nixl_backend import NixlBackend
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
+from lmcache.v1.memory_management import (AdHocMemoryAllocator, MemoryFormat,
+                                          MemoryObj)
+from lmcache.v1.storage_backend.connector.nixl_connector import (NixlConfig,
+                                                                 NixlRole)
+from lmcache.v1.storage_backend.nixl_backend import NixlBackend
 
 logger = init_logger(__name__)
 
@@ -32,7 +32,7 @@ def generate_test_data(
                            world_size=1,
                            worker_id=0,
                            chunk_hash=f"test_{i}"))
-        obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_BLOB)
+        obj = allocator.allocate(shape, dtype, fmt=MemoryFormat.KV_2LTD)
         obj.tensor.fill_(
             (i + 1) / num_objs)  # Fill with some test data, e.g., the index
         objs.append(obj)
@@ -70,7 +70,7 @@ def send_and_measure_throughput(backend: NixlBackend,
 
     backend.register_put_tasks(keys, [obj.metadata for obj in objs])
     start_time = time.time()
-    for key, obj in zip(keys, objs):
+    for key, obj in zip(keys, objs, strict=False):
         backend.submit_put_task(key, obj)
     backend.flush_put_tasks()
     end_time = time.time()
@@ -192,8 +192,8 @@ if __name__ == "__main__":
     # Common configuration
     config = NixlConfig(
         role=NixlRole(args.role),
-        peer_host_name=args.host,
-        peer_port=args.port,
+        receiver_host=args.host,
+        receiver_port=args.port,
         buffer_size=2**32,  # 4GB
         buffer_device='cuda',
     )

@@ -7,10 +7,10 @@ import torch
 from tqdm import tqdm
 
 from lmcache.config import LMCacheEngineMetadata
-from lmcache.experimental.cache_engine import LMCacheEngineBuilder
-from lmcache.experimental.config import LMCacheEngineConfig
-from lmcache.experimental.gpu_connector import VLLMPagedMemGPUConnectorV2
 from lmcache.logging import init_logger
+from lmcache.v1.cache_engine import LMCacheEngineBuilder
+from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
 
 logger = init_logger(__name__)
 
@@ -112,8 +112,8 @@ def create_config(role: str, host: str, port: int) -> LMCacheEngineConfig:
         enable_p2p=False,  # Nixl requires enable_p2p=False
         enable_nixl=True,  # Enable Nixl
         nixl_role=role,  # 'sender' or 'receiver'
-        nixl_peer_host=host,
-        nixl_peer_port=port,
+        nixl_receiver_host=host,
+        nixl_receiver_port=port,
         nixl_buffer_size=2**30,  # 1GB
         nixl_buffer_device='cuda',
     )
